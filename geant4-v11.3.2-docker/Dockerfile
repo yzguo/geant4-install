@@ -49,8 +49,9 @@ EXPOSE 22
 RUN cat /etc/ssh/sshd_config
 
 WORKDIR /tmp
-RUN wget https://coder.com/install.sh
-RUN bash ./install.sh
+RUN wget https://mirrors.ustc.edu.cn/github-release/coder/code-server/LatestRelease/code-server_4.105.1_amd64.deb && \
+    apt install -y ./code-server_4.105.1_amd64.deb && \
+    rm -f ./code-server_4.105.1_amd64.deb
 
 EXPOSE 8080
 
