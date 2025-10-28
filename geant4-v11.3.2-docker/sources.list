@@ -1,11 +1,9 @@
-# /etc/apt/sources.list（Debian 13 trixie 专用）
+# Debian 13 trixie 专用
 deb http://mirrors.ustc.edu.cn/debian/ trixie main contrib non-free non-free-firmware
 deb-src http://mirrors.ustc.edu.cn/debian/ trixie main contrib non-free non-free-firmware
 
-# Debian 13 安全更新源（trixie-security 已启用）
 deb http://mirrors.ustc.edu.cn/debian-security/ trixie-security main contrib non-free non-free-firmware
 deb-src http://mirrors.ustc.edu.cn/debian-security/ trixie-security main contrib non-free non-free-firmware
 
-# Debian 13 更新源（可选，获取后续小更新）
 deb http://mirrors.ustc.edu.cn/debian/ trixie-updates main contrib non-free non-free-firmware
 deb-src http://mirrors.ustc.edu.cn/debian/ trixie-updates main contrib non-free non-free-firmware
