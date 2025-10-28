@@ -59,8 +59,9 @@ RUN cat /etc/ssh/sshd_config
 RUN mkdir -p /work
 WORKDIR /work
 
-RUN axel -n 32 -o geant4.tar.gz https://gitlab.cern.ch/geant4/geant4/-/archive/v11.3.2/geant4-v11.3.2.tar.gz && \
-    tar -xzf geant4.tar.gz && \
+RUN axel -n 256 -o geant4.tar.gz https://gitlab.cern.ch/geant4/geant4/-/archive/v11.3.2/geant4-v11.3.2.tar.gz
+
+RUN tar -xzf geant4.tar.gz && \
     mv geant4-v11.3.2 geant4 && \
     mkdir -p geant4-build geant4-install && \
     cd geant4-build && \
