@@ -4,7 +4,6 @@ build:
 run:
 	sudo docker run -d -it --name geant4_docker \
 	-p 2223:22 \
-	-p 8080:8080 \
 	-v $(pwd)/work:/work \
 	geant4
 
