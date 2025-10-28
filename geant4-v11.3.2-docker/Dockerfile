@@ -32,14 +32,21 @@ RUN apt-get update && apt-get upgrade -y && \
     libexpat1-dev \
     qtbase5-dev \
     libvtk9-dev \
-    libvtk9-qt-dev
+    libvtk9-qt-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    freeglut3-dev \
+    mesa-utils \
+    mesa-common-dev \
+    libglew-dev \
+    libglfw3-dev
 
 RUN rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /var/run/sshd && \
     echo "root:$SSH_PASSWORD" | chpasswd && \
-    echo PermitRootLogin yes >> /etc/ssh/sshd_config.d/login.conf && \
-    echo PasswordAuthentication yes >> /etc/ssh/sshd_config.d/login.conf
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
 COPY ./ssh_banner.txt /etc/ssh/ssh_banner.txt
 RUN echo "Banner /etc/ssh/ssh_banner.txt" >> /etc/ssh/sshd_config
@@ -53,6 +60,7 @@ WORKDIR /work
 
 RUN wget -O geant4.tar.gz https://gitlab.cern.ch/geant4/geant4/-/archive/v11.3.2/geant4-v11.3.2.tar.gz && \
     tar -xzf geant4.tar.gz && \
+    mv geant4-v11.3.2 geant4 && \
     mkdir -p geant4-build geant4-install && \
     cd geant4-build && \
     cmake -DCMAKE_INSTALL_PREFIX=$GEANT4_INSTALL_DIR \
@@ -67,6 +75,7 @@ RUN wget -O geant4.tar.gz https://gitlab.cern.ch/geant4/geant4/-/archive/v11.3.2
 RUN echo "export GEANT4_INSTALL_DIR=$GEANT4_INSTALL_DIR" >> /root/.bashrc && \
     echo "source $GEANT4_INSTALL_DIR/bin/geant4.sh" >> /root/.bashrc && \
     echo "export CPATH=\$CPATH:$GEANT4_INSTALL_DIR/include" >> /root/.bashrc && \
-    echo "export LIBRARY_PATH=\$LIBRARY_PATH:$GEANT4_INSTALL_DIR/lib" >> /root/.bashrc
+    echo "export LIBRARY_PATH=\$LIBRARY_PATH:$GEANT4_INSTALL_DIR/lib" >> /root/.bashrc && \
+    echo "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:$GEANT4_INSTALL_DIR/lib" >> /root/.bashrc
 
 CMD ["/usr/sbin/sshd", "-D"]
