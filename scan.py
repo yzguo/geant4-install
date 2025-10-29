@@ -8,6 +8,8 @@ import datetime
 from pathlib import Path
 import subprocess
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 
 # Configuration
@@ -185,7 +187,7 @@ def plot_time_series(df, time_col, title_suffix, filename):
     
     current_time = pd.Timestamp.now()
     five_years_ago = current_time - pd.DateOffset(years=5)
-    df_recent = df[df['time_dt'] >= five_years_ago]
+    df_recent = df[df['time_dt'] >= five_years_ago].copy()
 
     if df_recent.empty:
         print(f"No data in last 5 years for {title_suffix}.")
