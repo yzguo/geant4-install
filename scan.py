@@ -74,6 +74,7 @@ def first_pass_collect_files_and_build_dir_sizes(root, mount_info):
                 continue
 
             size = st.st_size
+            atime = st.st_atime
             mtime = st.st_mtime
             ctime = st.st_ctime
 
@@ -97,8 +98,9 @@ def first_pass_collect_files_and_build_dir_sizes(root, mount_info):
             files_info.append({
                 'name': filename,
                 'absolute_path': filepath,
-                'creation_time': datetime.datetime.fromtimestamp(ctime).isoformat(),
-                'last_modified_time': datetime.datetime.fromtimestamp(mtime).isoformat(),
+                'access_time': datetime.datetime.fromtimestamp(atime).isoformat(),
+                'modification_time': datetime.datetime.fromtimestamp(mtime).isoformat(),
+                'change_time': datetime.datetime.fromtimestamp(ctime).isoformat(),
                 'size_bytes': size,
                 'is_file': True
             })
@@ -117,13 +119,15 @@ def generate_all_records(root, mount_info, dir_sizes, files_info):
         if st is None:
             ctime = mtime = 0.0
         else:
-            ctime = st.st_ctime
+            atime = st.st_atime
             mtime = st.st_mtime
+            ctime = st.st_ctime
         yield {
             'name': os.path.basename(d) or '/',
             'absolute_path': d,
-            'creation_time': datetime.datetime.fromtimestamp(ctime).isoformat(),
-            'last_modified_time': datetime.datetime.fromtimestamp(mtime).isoformat(),
+            'access_time': datetime.datetime.fromtimestamp(atime).isoformat(),
+            'modification_time': datetime.datetime.fromtimestamp(mtime).isoformat(),
+            'change_time': datetime.datetime.fromtimestamp(ctime).isoformat(),
             'size_bytes': dir_sizes[d],
             'is_file': False
         }
@@ -154,72 +158,75 @@ def write_records_in_chunks(generator, output_file, chunk_size=CHUNK_SIZE):
         print(f"Total written records: {count}.")
 
 def _write_chunk(output_file, chunk, write_header):
-    fieldnames = ['name', 'absolute_path', 'creation_time', 'last_modified_time', 'size_bytes', 'is_file']
+    fieldnames = ['name', 'absolute_path', 'access_time', 'modification_time', 'change_time', 'size_bytes', 'is_file']
     with open(output_file, 'a', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
-        # 清理字符串中的非法 Unicode
+        # Clean invalid UTF-8 characters
         safe_chunk = []
         for rec in chunk:
             safe_rec = {}
             for key, val in rec.items():
                 if isinstance(val, str):
-                    # 将 surrogate 转为 ?
+                    # Replace invalid UTF-8 characters with ?
                     safe_rec[key] = val.encode('utf-8', errors='replace').decode('utf-8')
                 else:
                     safe_rec[key] = val
             safe_chunk.append(safe_rec)
         writer.writerows(safe_chunk)
 
-def plot_modification_timeline_from_files(files_info):
-    if not files_info:
-        print("No file data available for plotting.")
+def plot_time_series(df, time_col, title_suffix, filename):
+    if df.empty:
+        print(f"No data for {title_suffix}.")
         return
 
-    df = pd.DataFrame(files_info)
-    df['mtime_dt'] = pd.to_datetime(df['last_modified_time'], format='ISO8601')
-
+    df['time_dt'] = pd.to_datetime(df[time_col], format='ISO8601')
+    
     current_time = pd.Timestamp.now()
     five_years_ago = current_time - pd.DateOffset(years=5)
-    df_recent = df[df['mtime_dt'] >= five_years_ago]
-    
+    df_recent = df[df['time_dt'] >= five_years_ago]
+
     if df_recent.empty:
-        print("No file data in the last 5 years for plotting.")
+        print(f"No data in last 5 years for {title_suffix}.")
         return
 
-    df['year_month'] = df['mtime_dt'].dt.to_period('M')
-    monthly_counts = df['year_month'].value_counts().sort_index()
+    df_recent['year_month'] = df_recent['time_dt'].dt.to_period('M')
+    
+    # Count and total size per month
+    monthly_stats = df_recent.groupby('year_month').agg(
+        file_count=('size_bytes', 'size'),
+        total_size=('size_bytes', 'sum')
+    ).reset_index()
 
-    x_dates = monthly_counts.index.to_timestamp() 
-    y_values = monthly_counts.values
+    x_dates = monthly_stats['year_month'].dt.to_timestamp()
+    counts = monthly_stats['file_count']
+    sizes = monthly_stats['total_size']
 
-    start_date = five_years_ago
-    end_date = current_time
+    fig, ax1 = plt.subplots(figsize=(20, 8))
 
-    plt.figure(figsize=(20, 8))
-    plt.bar(x_dates, y_values, color='lightgreen', width=25)
+    color = 'tab:blue'
+    ax1.set_xlabel('Year', fontsize=12)
+    ax1.set_ylabel('File Count', color=color, fontsize=12)
+    ax1.bar(x_dates, counts, color=color, width=25, alpha=0.6, label='File Count')
+    ax1.tick_params(axis='y', labelcolor=color)
 
-    # Set major ticks to "January of each year"
-    ax = plt.gca()
+    ax2 = ax1.twinx()
+    color = 'tab:red'
+    ax2.set_ylabel('Total Size (Bytes)', color=color, fontsize=12)
+    ax2.plot(x_dates, sizes, color=color, marker='o', linewidth=2, label='Total Size')
+    ax2.tick_params(axis='y', labelcolor=color)
 
-    ax.xaxis.set_major_locator(plt.matplotlib.dates.YearLocator())
-    ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y'))
+    ax1.set_xlim(five_years_ago, current_time)
+    ax1.xaxis.set_major_locator(plt.matplotlib.dates.YearLocator())
+    ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y'))
+    ax1.xaxis.set_minor_locator(plt.matplotlib.dates.MonthLocator(interval=3))
 
-    # Set minor ticks to "every quarter"
-    ax.xaxis.set_minor_locator(plt.matplotlib.dates.MonthLocator(interval=3))
-
-    ax.set_xlim(start_date, end_date)
-
-    plt.setp(ax.get_xticklabels(), rotation=0, ha='center', fontsize=12, color='black')
-    plt.setp(ax.get_xticklabels(minor=True), rotation=90, ha='right', fontsize=10, color='gray')
-    plt.title('File Count by Last Modified Time (Last 5 Years)', fontsize=14)
-    plt.xlabel('Year', fontsize=12)
-    plt.ylabel('File Count', fontsize=12)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.savefig('file_modification_timeline.png', dpi=150, bbox_inches='tight')
-    print("Visualization chart saved as: file_modification_timeline.png")
+    plt.setp(ax1.get_xticklabels(), rotation=0, ha='center', fontsize=12)
+    plt.title(f'File Activity by {title_suffix} (Last 5 Years)', fontsize=14)
+    fig.tight_layout()
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    print(f"Chart saved: {filename}")
 
 def main():
     if os.geteuid() != 0:
@@ -235,7 +242,14 @@ def main():
     print(f"\nFile statistics completed:")
     print(f"  Small files (<10MB): {small_count}")
     print(f"  Large files (>100MB): {large_count}")
+    print(f"  Total files: {len(files_info)}")
     print(f"  Total directories: {len(dir_sizes)}")
+
+    with open('file_statistics.txt', 'w') as stats_file:
+        stats_file.write(f"Small files (<10MB): {small_count}\n")
+        stats_file.write(f"Large files (>100MB): {large_count}\n")
+        stats_file.write(f"Total files: {len(files_info)}\n")
+        stats_file.write(f"Total directories: {len(dir_sizes)}\n")
 
     # Generate all records
     record_gen = generate_all_records(ROOT_PATH, mount_info, dir_sizes, files_info)
@@ -245,13 +259,22 @@ def main():
         os.remove(OUTPUT_CSV)  # Ensure it's a new file
     write_records_in_chunks(record_gen, OUTPUT_CSV, CHUNK_SIZE)
 
-    # Visualization (only with file information)
-    plot_modification_timeline_from_files(files_info)
+    # Convert files_info to DataFrame for plotting (only files)
+    if files_info:
+        df_files = pd.DataFrame(files_info)
+
+        # Plot by access time
+        plot_time_series(df_files, 'access_time', 'Last Access Time', 'file_access_timeline.png')
+
+        # Plot by modification time
+        plot_time_series(df_files, 'modification_time', 'Last Modification Time', 'file_modification_timeline.png')
+    else:
+        print("No file data to plot.")
 
     elapsed = time.time() - start_time
     print(f"\nAll tasks completed! Total time: {elapsed:.2f} seconds")
     print(f"Result file: {OUTPUT_CSV}")
-    print(f"Visualization chart: file_modification_timeline.png")
+    print("Visualization charts: file_access_timeline.png, file_modification_timeline.png")
 
 if __name__ == "__main__":
     main()
