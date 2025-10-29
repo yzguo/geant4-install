@@ -17,6 +17,7 @@ RUN apt-get update && apt-get upgrade -y && \
     sudo \
     build-essential \
     net-tools \
+    ca-certificates \
     git \
     cmake \
     wget \
