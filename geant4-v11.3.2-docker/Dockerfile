@@ -1,4 +1,4 @@
-FROM debian:13
+FROM debian:12
 
 LABEL maintainer="Yanzhen Guo<yzhguo@mail.ustc.edu.cn>" \
       version="1.0" \
@@ -54,12 +54,10 @@ RUN echo "Banner /etc/ssh/ssh_banner.txt" >> /etc/ssh/sshd_config
 
 EXPOSE 22
 
-RUN cat /etc/ssh/sshd_config
-
 RUN mkdir -p /work
 WORKDIR /work
 
-RUN axel -n 256 -o geant4.tar.gz https://gitlab.cern.ch/geant4/geant4/-/archive/v11.3.2/geant4-v11.3.2.tar.gz
+RUN axel -n 512 -o geant4.tar.gz https://gitlab.cern.ch/geant4/geant4/-/archive/v11.3.2/geant4-v11.3.2.tar.gz
 
 RUN tar -xzf geant4.tar.gz && \
     mv geant4-v11.3.2 geant4 && \

@@ -4,8 +4,7 @@ build:
 run:
 	sudo docker run -d -it --name geant4_docker \
 	-p 2223:22 \
-	-v "$(PWD)/work:/work" \
-	geant4
+	geant4:v11.3.2
 
 bash:
 	sudo docker exec -it geant4_docker /bin/bash

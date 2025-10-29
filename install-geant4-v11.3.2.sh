@@ -26,7 +26,7 @@ make install
 source $HOME/geant4/geant4-install/bin/geant4.sh
 echo "source $HOME/geant4/geant4-install/bin/geant4.sh" >> $HOME/.bashrc
 
-echo "Geant4 安装完成!请重启终端或执行 source $HOME/.bashrc 生效!"
+echo "Geant4 Installed in $HOME/geant4/geant4-install, please restart your terminal or run 'source ~/.bashrc' to use Geant4."
 
 rm -rf $HOME/geant4/geant4-v11.3.2.tar.gz
 rm -rf $HOME/geant4/geant4-build

@@ -1,9 +1,12 @@
-# Debian 13 trixie 专用
-deb http://mirrors.ustc.edu.cn/debian/ trixie main contrib non-free non-free-firmware
-deb-src http://mirrors.ustc.edu.cn/debian/ trixie main contrib non-free non-free-firmware
+# deb cdrom:[Debian GNU/Linux 12.7.0 _Bookworm_ - Official amd64 DVD Binary-1 with firmware 20240831-10:40]/ bookworm contrib main non-free-firmware
 
-deb http://mirrors.ustc.edu.cn/debian-security/ trixie-security main contrib non-free non-free-firmware
-deb-src http://mirrors.ustc.edu.cn/debian-security/ trixie-security main contrib non-free non-free-firmware
+deb http://mirrors.ustc.edu.cn/debian/ bookworm main non-free-firmware
+deb-src http://mirrors.ustc.edu.cn/debian/ bookworm main non-free-firmware
 
-deb http://mirrors.ustc.edu.cn/debian/ trixie-updates main contrib non-free non-free-firmware
-deb-src http://mirrors.ustc.edu.cn/debian/ trixie-updates main contrib non-free non-free-firmware
+deb http://mirrors.ustc.edu.cn/debian-security bookworm-security main non-free-firmware
+deb-src http://mirrors.ustc.edu.cn/debian-security bookworm-security main non-free-firmware
+
+# bookworm-updates, to get updates before a point release is made;
+# see https://www.debian.org/doc/manuals/debian-reference/ch02.en.html#_updates_and_backports
+deb http://mirrors.ustc.edu.cn/debian/ bookworm-updates main non-free-firmware
+deb-src http://mirrors.ustc.edu.cn/debian/ bookworm-updates main non-free-firmware
