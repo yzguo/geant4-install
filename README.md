@@ -7,7 +7,7 @@ Geant4 在 Linux 及 Docker 中的安装脚本
 需要有 sudo 权限或以 root 用户执行如下命令：
 
 ```bash
-wget https://github.com/yzguo/geant4-install | sh
+wget https://github.com/yzguo/geant4-install/install-geant4-v11.3.2.sh | sh
 ```
 
 该脚本会将 Geant4 安装到 $HOME/geant4/ 目录中。
