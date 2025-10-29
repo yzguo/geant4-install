@@ -159,7 +159,18 @@ def _write_chunk(output_file, chunk, write_header):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
-        writer.writerows(chunk)
+        # 清理字符串中的非法 Unicode
+        safe_chunk = []
+        for rec in chunk:
+            safe_rec = {}
+            for key, val in rec.items():
+                if isinstance(val, str):
+                    # 将 surrogate 转为 ?
+                    safe_rec[key] = val.encode('utf-8', errors='replace').decode('utf-8')
+                else:
+                    safe_rec[key] = val
+            safe_chunk.append(safe_rec)
+        writer.writerows(safe_chunk)
 
 def plot_modification_timeline_from_files(files_info):
     if not files_info:
