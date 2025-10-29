@@ -4,7 +4,7 @@ build:
 run:
 	sudo docker run -d -it --name geant4_docker \
 	-p 2223:22 \
-	-v $(pwd)/work:/work \
+	-v "$(PWD)/work:/work" \
 	geant4
 
 bash:
