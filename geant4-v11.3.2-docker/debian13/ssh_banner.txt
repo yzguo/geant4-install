@@ -1,0 +1,8 @@
+ _________________________________________________
+|    Welcome to Geant4 develop environment!       |
+| built by: Yanzhen Guo <yzhguo@mail.ustc.edu.cn> |
+|-------------------------------------------------|
+| Please login as:                                |
+|     User: root                                  |
+|     Password: geant4                            |
+|_________________________________________________|
