@@ -1,6 +1,7 @@
 build:
 	sudo docker build -t geant4:v11.3.2 .
 
+# podman should use: sudo podman run -d --init -it --name geant4_docker -p 2223:22 geant4:v11.3.2
 run:
 	sudo docker run -d -it --name geant4_docker \
 	-p 2223:22 \
