@@ -1,7 +1,6 @@
 build:
 	sudo docker build -t geant4:v11.3.2 .
 
-# podman should use: sudo podman run -d --init -it --name geant4_docker -p 2223:22 geant4:v11.3.2
 run:
 	sudo docker run -d -it --name geant4_docker \
 	-p 2223:22 \
@@ -11,7 +10,7 @@ bash:
 	sudo docker exec -it geant4_docker /bin/bash
 
 ssh:
-	ssh -p 2223 root@localhost
+	ssh -XY -p 2223 root@localhost
 
 stop:
 	sudo docker stop geant4_docker

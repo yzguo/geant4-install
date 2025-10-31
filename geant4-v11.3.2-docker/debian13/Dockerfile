@@ -12,10 +12,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN rm -rf /etc/apt/sources.list.d || true
 COPY sources.list /etc/apt/sources.list
 
-RUN apt-get update && \
-    apt-get install -y locales && \
-    echo "zh_CN.UTF-8 UTF-8" >> /etc/locale.gen && \
-    locale-gen zh_CN.UTF-8
+# If you need Chinese locale support, uncomment the following lines
+# RUN apt-get update && \
+#     apt-get install -y locales && \
+#     echo "zh_CN.UTF-8 UTF-8" >> /etc/locale.gen && \
+#     locale-gen zh_CN.UTF-8
 
 RUN apt-get update && apt-get upgrade -y && \
     apt-get install -y \
