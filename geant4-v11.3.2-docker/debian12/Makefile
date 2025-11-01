@@ -12,6 +12,10 @@ bash:
 ssh:
 	ssh -XY -p 2223 root@localhost
 
+example:
+	sudo docker exec -it geant4_docker /bin/bash -c "cd /work/geant4/share/Geant4/examples/basic/B1 && mkdir -p build && cd build && cmake .. && make && ./exampleB1"
+	echo "Example B1 executed. Check the output for results."
+
 stop:
 	sudo docker stop geant4_docker
 

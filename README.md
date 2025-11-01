@@ -18,9 +18,9 @@ wget https://github.com/yzguo/geant4-install/install-geant4-v11.3.2.sh | sh
 
 ```bash
 git clone https://github.com/yzguo/geant4-install.git
-cd geant4-v11.3.2-docker/
+cd geant4-v11.3.2-docker/debian13
 make build
 make run
 ```
 
-然后就可以使用用 ssh -p 2223@localhoost 来使用 Geant4 了，也可以在局域网中通过将 localhost 替换为主机的 IP 地址来访问。
+然后就可以使用用 ssh -p 2223 root@localhoost 来使用 Geant4 了，也可以在局域网中通过将 localhost 替换为主机的 IP 地址来访问。
