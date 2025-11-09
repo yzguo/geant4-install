@@ -1,282 +1,288 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+File Inventory Scanner and Visualizer
+
+Scans the entire filesystem from root recursively.
+- Skips non-local filesystems (NFS, CIFS, FUSE, etc.)
+- Collects: file path, size, mtime, atime
+- Writes results incrementally to a CSV file
+- Generates an interactive time-based visualization
+- Handles non-UTF-8 filenames safely
+
+Must be run as root to access all files.
+
+Author: Yanzhen Guo
+"""
+
 import os
 import sys
-import time
 import csv
+import time
 import stat
-import datetime
+import argparse
 from pathlib import Path
-import subprocess
-import pandas as pd
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
-import matplotlib.pyplot as plt
+from typing import Iterator, Tuple, Set
 
-# Configuration
-ROOT_PATH = "/"
-OUTPUT_CSV = "file_scan.csv"
-CHUNK_SIZE = 100_000
-SMALL_FILE_THRESHOLD = 10 * 1024 * 1024      # 10 MB
-LARGE_FILE_THRESHOLD = 100 * 1024 * 1024     # 100 MB
+# Optional: for visualization
+try:
+    import pandas as pd
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    HAS_VIS = True
+except ImportError:
+    HAS_VIS = False
+    print("Warning: pandas or plotly not installed. Visualization will be skipped.", file=sys.stderr)
 
-def get_mount_points():
-    mount_info = {}
-    try:
-        result = subprocess.run(['findmnt', '-n', '-o', 'TARGET,FSTYPE'], capture_output=True, text=True)
-        for line in result.stdout.strip().split('\n'):
-            if line:
-                parts = line.split()
-                if len(parts) >= 2:
-                    target = parts[0]
-                    fstype = parts[1]
-                    mount_info[target] = fstype
-    except Exception as e:
-        print(f"[Warning] Can't get mount info: {e}", file=sys.stderr)
-    return mount_info
 
-def should_skip(path_str, mount_info):
-    path = Path(path_str)
-    for mount_point, fstype in mount_info.items():
+def is_root():
+    """Check if script is running as root."""
+    return os.geteuid() == 0
+
+
+def get_local_filesystems() -> Set[str]:
+    """
+    Get set of mount points that are on local filesystems.
+    Skips remote/network filesystems like nfs, cifs, fuse.*, etc.
+    Uses /proc/mounts if available, fallback to /etc/mtab.
+    """
+    remote_fs_types = {
+        'nfs', 'nfs4', 'cifs', 'smbfs', 'sshfs', 'fuse.sshfs',
+        'glusterfs', 'lustre', 'afs', '9p', 'ceph', 'gcsfuse',
+        's3fs', 'davfs', 'ftpfs'
+    }
+
+    local_mounts = set()
+    candidates = ['/proc/mounts', '/etc/mtab']
+
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
         try:
-            if path.is_relative_to(mount_point):
-                if any(fs in fstype.lower() for fs in ['nfs', 'cifs', 'smb', 'proc', 'sysfs', 'devtmpfs', 'tmpfs', 'overlay', 'fuse', 'autofs']):
-                    return True
-        except ValueError:
+            with open(candidate, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    mount_point = parts[1]
+                    fs_type = parts[2]
+                    if fs_type not in remote_fs_types:
+                        try:
+                            # Normalize path and ensure it's absolute
+                            resolved = os.path.realpath(mount_point)
+                            local_mounts.add(resolved)
+                        except (OSError, ValueError):
+                            continue
+            break  # prefer /proc/mounts
+        except (OSError, IOError) as e:
             continue
-    return False
+    else:
+        # Fallback: assume only '/' is local if no mount info
+        local_mounts.add('/')
 
-def safe_stat(path):
+    return local_mounts
+
+
+def is_on_local_fs(path: Path, local_mounts: Set[str]) -> bool:
+    """Check if path is on a local filesystem."""
     try:
-        return os.lstat(path)
-    except (OSError, IOError):
-        return None
+        path_abs = os.path.realpath(str(path))
+    except (OSError, ValueError):
+        return False
 
-def first_pass_collect_files_and_build_dir_sizes(root, mount_info):
+    # Check ancestors from deepest to root
+    current = path_abs
+    while current != '/':
+        if current in local_mounts:
+            return True
+        current = os.path.dirname(current)
+    return '/' in local_mounts
+
+
+def safe_decode_path(path_bytes: bytes) -> str:
+    """Safely decode a path that may contain invalid UTF-8."""
+    try:
+        return path_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        return path_bytes.decode('utf-8', errors='replace')
+
+
+def walk_files_safe(root_path: Path, local_mounts: Set[str]) -> Iterator[Tuple[str, int, float, float]]:
     """
-    First pass: traverse all files, collect file info, and build directory sizes.
-    Returns:
-        files_info: list of file records (for stats & later output)
-        dir_sizes: dict {dir_path: total_size}
+    Recursively yield (path, size, mtime, atime) for regular files only.
+    Skips directories, symlinks, devices, etc.
+    Safely handles permission errors and non-UTF-8 paths.
     """
-    files_info = []
-    dir_sizes = {}
-    small_count = 0
-    large_count = 0
+    try:
+        with os.scandir(root_path) as it:
+            for entry in it:
+                try:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir():
+                        # Recurse only if on local filesystem
+                        if is_on_local_fs(Path(entry.path), local_mounts):
+                            yield from walk_files_safe(Path(entry.path), local_mounts)
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
 
-    print("First pass: traverse all files and calculate directory sizes...")
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
-        # Skip mount points
-        dirnames[:] = [d for d in dirnames if not should_skip(os.path.join(dirpath, d), mount_info)]
+                    stat_info = entry.stat(follow_symlinks=False)
+                    size = stat_info.st_size
+                    mtime = stat_info.st_mtime
+                    atime = stat_info.st_atime
 
-        # Process files
-        for filename in filenames:
-            filepath = os.path.join(dirpath, filename)
-            st = safe_stat(filepath)
-            if st is None or not stat.S_ISREG(st.st_mode):
-                continue
+                    # Get safe string path
+                    if isinstance(entry.path, bytes):
+                        path_str = safe_decode_path(entry.path)
+                    else:
+                        path_str = entry.path
 
-            size = st.st_size
-            atime = st.st_atime
-            mtime = st.st_mtime
-            ctime = st.st_ctime
+                    yield (path_str, size, mtime, atime)
 
-            # Update directory sizes (all parent directories)
-            current = dirpath
-            while True:
-                dir_sizes[current] = dir_sizes.get(current, 0) + size
-                if current == ROOT_PATH:
-                    break
-                parent = os.path.dirname(current)
-                if parent == current:  # Prevent infinite loop at root
-                    break
-                current = parent
+                except (OSError, IOError, ValueError):
+                    # Skip inaccessible or corrupted entries
+                    continue
+    except (OSError, IOError, PermissionError):
+        # Cannot read this directory; skip
+        pass
 
-            # File statistics
-            if size < SMALL_FILE_THRESHOLD:
-                small_count += 1
-            if size > LARGE_FILE_THRESHOLD:
-                large_count += 1
-
-            files_info.append({
-                'name': filename,
-                'absolute_path': filepath,
-                'access_time': datetime.datetime.fromtimestamp(atime).isoformat(),
-                'modification_time': datetime.datetime.fromtimestamp(mtime).isoformat(),
-                'change_time': datetime.datetime.fromtimestamp(ctime).isoformat(),
-                'size_bytes': size,
-                'is_file': True
-            })
-
-    return files_info, dir_sizes, small_count, large_count
-
-def generate_all_records(root, mount_info, dir_sizes, files_info):
-    """Generator: yield directory records + file records in order"""
-    # First yield all directories (sorted by path to ensure parent-child relationships are clear)
-    print("Generating directory records...")
-    sorted_dirs = sorted(dir_sizes.keys())
-    for d in sorted_dirs:
-        if should_skip(d, mount_info):
-            continue
-        st = safe_stat(d)
-        if st is None:
-            ctime = mtime = 0.0
-        else:
-            atime = st.st_atime
-            mtime = st.st_mtime
-            ctime = st.st_ctime
-        yield {
-            'name': os.path.basename(d) or '/',
-            'absolute_path': d,
-            'access_time': datetime.datetime.fromtimestamp(atime).isoformat(),
-            'modification_time': datetime.datetime.fromtimestamp(mtime).isoformat(),
-            'change_time': datetime.datetime.fromtimestamp(ctime).isoformat(),
-            'size_bytes': dir_sizes[d],
-            'is_file': False
-        }
-
-    # Then yield all files
-    print("Generating file records...")
-    for f in files_info:
-        yield f
-
-def write_records_in_chunks(generator, output_file, chunk_size=CHUNK_SIZE):
-    """Write CSV in chunks to avoid memory overflow"""
-    first = True
-    chunk = []
-    count = 0
-
-    for record in generator:
-        chunk.append(record)
-        count += 1
-        if len(chunk) >= chunk_size:
-            _write_chunk(output_file, chunk, first)
-            first = False
-            chunk = []
-            print(f"Written {count} records so far...")
-
-    # Write remaining records
-    if chunk:
-        _write_chunk(output_file, chunk, first)
-        print(f"Total written records: {count}.")
-
-def _write_chunk(output_file, chunk, write_header):
-    fieldnames = ['name', 'absolute_path', 'access_time', 'modification_time', 'change_time', 'size_bytes', 'is_file']
-    with open(output_file, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if write_header:
-            writer.writeheader()
-        # Clean invalid UTF-8 characters
-        safe_chunk = []
-        for rec in chunk:
-            safe_rec = {}
-            for key, val in rec.items():
-                if isinstance(val, str):
-                    # Replace invalid UTF-8 characters with ?
-                    safe_rec[key] = val.encode('utf-8', errors='replace').decode('utf-8')
-                else:
-                    safe_rec[key] = val
-            safe_chunk.append(safe_rec)
-        writer.writerows(safe_chunk)
-
-def plot_time_series(df, time_col, title_suffix, filename):
-    if df.empty:
-        print(f"No data for {title_suffix}.")
-        return
-
-    df['time_dt'] = pd.to_datetime(df[time_col], format='ISO8601')
-    
-    current_time = pd.Timestamp.now()
-    five_years_ago = current_time - pd.DateOffset(years=5)
-    df_recent = df[df['time_dt'] >= five_years_ago].copy()
-
-    if df_recent.empty:
-        print(f"No data in last 5 years for {title_suffix}.")
-        return
-
-    df_recent['year_month'] = df_recent['time_dt'].dt.to_period('M')
-    
-    # Count and total size per month
-    monthly_stats = df_recent.groupby('year_month').agg(
-        file_count=('size_bytes', 'size'),
-        total_size=('size_bytes', 'sum')
-    ).reset_index()
-
-    x_dates = monthly_stats['year_month'].dt.to_timestamp()
-    counts = monthly_stats['file_count']
-    sizes = monthly_stats['total_size']
-
-    fig, ax1 = plt.subplots(figsize=(20, 8))
-
-    color = 'tab:blue'
-    ax1.set_xlabel('Year', fontsize=12)
-    ax1.set_ylabel('File Count', color=color, fontsize=12)
-    ax1.bar(x_dates, counts, color=color, width=25, alpha=0.6, label='File Count')
-    ax1.tick_params(axis='y', labelcolor=color)
-
-    ax2 = ax1.twinx()
-    color = 'tab:red'
-    ax2.set_ylabel('Total Size (Bytes)', color=color, fontsize=12)
-    ax2.plot(x_dates, sizes, color=color, marker='o', linewidth=2, label='Total Size')
-    ax2.tick_params(axis='y', labelcolor=color)
-
-    ax1.set_xlim(five_years_ago, current_time)
-    ax1.xaxis.set_major_locator(plt.matplotlib.dates.YearLocator())
-    ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y'))
-    ax1.xaxis.set_minor_locator(plt.matplotlib.dates.MonthLocator(interval=3))
-
-    plt.setp(ax1.get_xticklabels(), rotation=0, ha='center', fontsize=12)
-    plt.title(f'File Activity by {title_suffix} (Last 5 Years)', fontsize=14)
-    fig.tight_layout()
-    plt.savefig(filename, dpi=150, bbox_inches='tight')
-    print(f"Chart saved: {filename}")
 
 def main():
-    if os.geteuid() != 0:
-        print("Root privileges are required!", file=sys.stderr)
+    parser = argparse.ArgumentParser(description="Scan filesystem and generate inventory CSV + visualization.")
+    parser.add_argument("-o", "--output", default="file_inventory.csv",
+                        help="Output CSV file path (default: file_inventory.csv)")
+    parser.add_argument("-c", "--chunk-size", type=int, default=10000,
+                        help="Number of rows per write chunk (default: 10000)")
+    parser.add_argument("-v", "--visualize", action="store_true",
+                        help="Generate interactive HTML visualization after scan")
+    args = parser.parse_args()
+
+    if not is_root():
+        print("Error: This script must be run as root.", file=sys.stderr)
         sys.exit(1)
 
-    print("Getting mount point information...")
-    mount_info = get_mount_points()
+    csv_path = Path(args.output).resolve()
+    chunk_size = args.chunk_size
 
+    print("Scanning local filesystems only (skipping NFS, CIFS, etc.)...")
+    local_mounts = get_local_filesystems()
+    print(f"Local mount points considered: {sorted(local_mounts)}")
+
+    # Prepare CSV
+    fieldnames = ['path', 'size_bytes', 'mtime', 'atime']
+    first_write = True
+    buffer = []
+
+    count = 0
     start_time = time.time()
-    files_info, dir_sizes, small_count, large_count = first_pass_collect_files_and_build_dir_sizes(ROOT_PATH, mount_info)
 
-    print(f"\nFile statistics completed:")
-    print(f"  Small files (<10MB): {small_count}")
-    print(f"  Large files (>100MB): {large_count}")
-    print(f"  Total files: {len(files_info)}")
-    print(f"  Total directories: {len(dir_sizes)}")
+    try:
+        for record in walk_files_safe(Path('/'), local_mounts):
+            buffer.append(record)
+            count += 1
 
-    with open('file_statistics.txt', 'w') as stats_file:
-        stats_file.write(f"Small files (<10MB): {small_count}\n")
-        stats_file.write(f"Large files (>100MB): {large_count}\n")
-        stats_file.write(f"Total files: {len(files_info)}\n")
-        stats_file.write(f"Total directories: {len(dir_sizes)}\n")
+            if len(buffer) >= chunk_size:
+                mode = 'w' if first_write else 'a'
+                with open(csv_path, mode, newline='', encoding='utf-8', errors='replace') as f:
+                    writer = csv.writer(f)
+                    if first_write:
+                        writer.writerow(fieldnames)
+                        first_write = False
+                    writer.writerows(buffer)
+                buffer.clear()
+                elapsed = time.time() - start_time
+                print(f"Processed {count} files... ({elapsed:.1f}s)", file=sys.stderr)
 
-    # Generate all records
-    record_gen = generate_all_records(ROOT_PATH, mount_info, dir_sizes, files_info)
+        # Final flush
+        if buffer:
+            with open(csv_path, 'a', newline='', encoding='utf-8', errors='replace') as f:
+                writer = csv.writer(f)
+                writer.writerows(buffer)
 
-    # Write CSV in chunks
-    if os.path.exists(OUTPUT_CSV):
-        os.remove(OUTPUT_CSV)  # Ensure it's a new file
-    write_records_in_chunks(record_gen, OUTPUT_CSV, CHUNK_SIZE)
+        total_time = time.time() - start_time
+        print(f"Scan complete: {count} files written to {csv_path} in {total_time:.1f} seconds.")
 
-    # Convert files_info to DataFrame for plotting (only files)
-    if files_info:
-        df_files = pd.DataFrame(files_info)
+    except KeyboardInterrupt:
+        print("\nInterrupted by user. Partial results saved.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error: {e}", file=sys.stderr)
+        sys.exit(1)
 
-        # Plot by access time
-        plot_time_series(df_files, 'access_time', 'Last Access Time', 'file_access_timeline.png')
+    # Visualization
+    if args.visualize and HAS_VIS:
+        try:
+            print("Generating visualization...")
+            df = pd.read_csv(csv_path, dtype={'path': 'str', 'size_bytes': 'int64'})
 
-        # Plot by modification time
-        plot_time_series(df_files, 'modification_time', 'Last Modification Time', 'file_modification_timeline.png')
-    else:
-        print("No file data to plot.")
+            # Convert timestamps to datetime
+            df['mtime_dt'] = pd.to_datetime(df['mtime'], unit='s')
+            df['atime_dt'] = pd.to_datetime(df['atime'], unit='s')
 
-    elapsed = time.time() - start_time
-    print(f"\nAll tasks completed! Total time: {elapsed:.2f} seconds")
-    print(f"Result file: {OUTPUT_CSV}")
-    print("Visualization charts: file_access_timeline.png, file_modification_timeline.png")
+            # Resample by month for aggregation
+            df['mtime_month'] = df['mtime_dt'].dt.to_period('M').dt.start_time
+            df['atime_month'] = df['atime_dt'].dt.to_period('M').dt.start_time
+
+            # Aggregate: count and total size per month (for mtime)
+            mtime_agg = df.groupby('mtime_month').agg(
+                file_count=('path', 'count'),
+                total_size=('size_bytes', 'sum')
+            ).reset_index()
+
+            # Create plot
+            fig = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.05,
+                subplot_titles=('File Count by Modification Month', 'Total Size by Modification Month')
+            )
+
+            # File count
+            fig.add_trace(
+                go.Bar(x=mtime_agg['mtime_month'], y=mtime_agg['file_count'], name='File Count'),
+                row=1, col=1
+            )
+
+            # Total size
+            fig.add_trace(
+                go.Bar(x=mtime_agg['mtime_month'], y=mtime_agg['total_size'], name='Total Size (bytes)'),
+                row=2, col=1
+            )
+
+            fig.update_layout(
+                title="File Inventory by Modification Time (Local Filesystems Only)",
+                height=700,
+                showlegend=False
+            )
+
+            # Add hover with sample file paths (top 10 per month)
+            hover_data = {}
+            for month in mtime_agg['mtime_month']:
+                sample_files = df[df['mtime_month'] == month]['path'].head(10).tolist()
+                hover_text = "<br>".join([f"• {p}" for p in sample_files])
+                hover_data[month] = f"Files (sample):<br>{hover_text}"
+
+            # Apply hover to both traces
+            for trace in fig.data:
+                trace.hovertemplate = (
+                    '<b>%{x|%Y-%m}</b><br>' +
+                    ('File Count: %{y:,}' if 'count' in trace.name else 'Size: %{y:,} bytes') +
+                    '<br><br>' +
+                    '%{customdata}' +
+                    '<extra></extra>'
+                )
+                trace.customdata = [hover_data.get(x, "") for x in trace.x]
+
+            output_html = csv_path.with_suffix('.html')
+            fig.write_html(output_html)
+            print(f"Visualization saved to {output_html}")
+
+        except Exception as e:
+            print(f"Visualization failed: {e}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()
