@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-File Inventory Scanner and Visualizer
-
-Scans the entire filesystem from root recursively.
-- Skips non-local filesystems (NFS, CIFS, FUSE, etc.)
-- Collects: file path, size, mtime, atime
-- Writes results incrementally to a CSV file
-- Generates an interactive time-based visualization
-- Handles non-UTF-8 filenames safely
-
-Must be run as root to access all files.
-
-Author: Yanzhen Guo
-"""
+# filesystem_audit.py
+# Author: Auto-generated for secure filesystem audit
+# Purpose: Scan entire filesystem (excluding virtual/network mounts), collect file metadata,
+#          write to CSV in chunks, and generate an interactive time-based visualization.
 
 import os
 import sys
@@ -23,266 +11,263 @@ import time
 import stat
 import argparse
 from pathlib import Path
-from typing import Iterator, Tuple, Set
+from datetime import datetime
+from collections import defaultdict
 
-# Optional: for visualization
-try:
-    import pandas as pd
-    import plotly.express as px
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    HAS_VIS = True
-except ImportError:
-    HAS_VIS = False
-    print("Warning: pandas or plotly not installed. Visualization will be skipped.", file=sys.stderr)
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 
-def is_root():
-    """Check if script is running as root."""
-    return os.geteuid() == 0
+# List of filesystem types to skip (common virtual and network filesystems)
+SKIP_FS_TYPES = {
+    'proc', 'sysfs', 'devtmpfs', 'tmpfs', 'devpts', 'cgroup', 'cgroup2',
+    'pstore', 'efivarfs', 'bpf', 'securityfs', 'debugfs', 'tracefs',
+    'fusectl', 'mqueue', 'hugetlbfs', 'autofs', 'overlay',
+    'nfs', 'nfs4', 'cifs', 'smb3', 'smbfs', 'fuse.sshfs', 'glusterfs',
+    'lustre', '9p', 'afs'
+}
 
 
-def get_local_filesystems() -> Set[str]:
-    """
-    Get set of mount points that are on local filesystems.
-    Skips remote/network filesystems like nfs, cifs, fuse.*, etc.
-    Uses /proc/mounts if available, fallback to /etc/mtab.
-    """
-    remote_fs_types = {
-        'nfs', 'nfs4', 'cifs', 'smbfs', 'sshfs', 'fuse.sshfs',
-        'glusterfs', 'lustre', 'afs', '9p', 'ceph', 'gcsfuse',
-        's3fs', 'davfs', 'ftpfs'
-    }
-
-    local_mounts = set()
-    candidates = ['/proc/mounts', '/etc/mtab']
-
-    for candidate in candidates:
-        if not os.path.exists(candidate):
-            continue
-        try:
-            with open(candidate, 'r', encoding='utf-8', errors='replace') as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) < 3:
-                        continue
-                    mount_point = parts[1]
-                    fs_type = parts[2]
-                    if fs_type not in remote_fs_types:
-                        try:
-                            # Normalize path and ensure it's absolute
-                            resolved = os.path.realpath(mount_point)
-                            local_mounts.add(resolved)
-                        except (OSError, ValueError):
-                            continue
-            break  # prefer /proc/mounts
-        except (OSError, IOError) as e:
-            continue
-    else:
-        # Fallback: assume only '/' is local if no mount info
-        local_mounts.add('/')
-
-    return local_mounts
-
-
-def is_on_local_fs(path: Path, local_mounts: Set[str]) -> bool:
-    """Check if path is on a local filesystem."""
+def get_mount_points():
+    """Get dictionary of mount points and their filesystem types."""
+    mounts = {}
     try:
-        path_abs = os.path.realpath(str(path))
-    except (OSError, ValueError):
-        return False
+        with open('/proc/mounts', 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point = parts[1]
+                fs_type = parts[2]
+                mounts[mount_point] = fs_type
+    except Exception as e:
+        print(f"[WARNING] Failed to read /proc/mounts: {e}", file=sys.stderr)
+    return mounts
 
-    # Check ancestors from deepest to root
-    current = path_abs
-    while current != '/':
-        if current in local_mounts:
-            return True
-        current = os.path.dirname(current)
-    return '/' in local_mounts
+
+def should_skip_path(path_str, mount_info):
+    """Determine if a path belongs to a skipped filesystem."""
+    path = Path(path_str)
+    # Ensure absolute path
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return True  # skip if resolution fails
+
+    # Find the deepest mount point that is a prefix of this path
+    matching_mounts = [mp for mp in mount_info if str(resolved).startswith(mp)]
+    if not matching_mounts:
+        return False  # unlikely, but safe to scan
+
+    # Choose the longest (most specific) mount point
+    best_match = max(matching_mounts, key=len)
+    fs_type = mount_info[best_match]
+
+    return fs_type in SKIP_FS_TYPES
 
 
-def safe_decode_path(path_bytes: bytes) -> str:
-    """Safely decode a path that may contain invalid UTF-8."""
+def safe_decode_path(path_bytes):
+    """Safely decode a filesystem path that may contain non-UTF-8 bytes."""
     try:
         return path_bytes.decode('utf-8')
     except UnicodeDecodeError:
+        # Replace invalid bytes to produce a valid string
         return path_bytes.decode('utf-8', errors='replace')
 
 
-def walk_files_safe(root_path: Path, local_mounts: Set[str]) -> Iterator[Tuple[str, int, float, float]]:
-    """
-    Recursively yield (path, size, mtime, atime) for regular files only.
-    Skips directories, symlinks, devices, etc.
-    Safely handles permission errors and non-UTF-8 paths.
-    """
-    try:
-        with os.scandir(root_path) as it:
-            for entry in it:
-                try:
-                    if entry.is_symlink():
-                        continue
-                    if entry.is_dir():
-                        # Recurse only if on local filesystem
-                        if is_on_local_fs(Path(entry.path), local_mounts):
-                            yield from walk_files_safe(Path(entry.path), local_mounts)
-                        continue
-                    if not entry.is_file(follow_symlinks=False):
-                        continue
+def collect_file_metadata(root_path='/', chunk_size=100000, csv_path='filesystem_audit.csv'):
+    """Recursively scan filesystem and write file metadata to CSV in chunks."""
+    if os.geteuid() != 0:
+        print("[ERROR] This script must be run as root.", file=sys.stderr)
+        sys.exit(1)
 
-                    stat_info = entry.stat(follow_symlinks=False)
-                    size = stat_info.st_size
-                    mtime = stat_info.st_mtime
-                    atime = stat_info.st_atime
+    mount_info = get_mount_points()
 
-                    # Get safe string path
-                    if isinstance(entry.path, bytes):
-                        path_str = safe_decode_path(entry.path)
-                    else:
-                        path_str = entry.path
+    # Open CSV file for writing
+    with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['path', 'size_bytes', 'mtime', 'atime']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
 
-                    yield (path_str, size, mtime, atime)
+        buffer = []
+        file_count = 0
 
-                except (OSError, IOError, ValueError):
-                    # Skip inaccessible or corrupted entries
+        try:
+            for dirpath, dirnames, filenames in os.walk(root_path, topdown=True):
+                # Modify dirnames in-place to skip problematic subdirs early
+                # This does NOT fully prevent entry if mount info is missing,
+                # but improves performance.
+                if should_skip_path(dirpath, mount_info):
+                    dirnames[:] = []  # prune search
                     continue
-    except (OSError, IOError, PermissionError):
-        # Cannot read this directory; skip
-        pass
+
+                for filename in filenames:
+                    filepath = os.path.join(dirpath, filename)
+
+                    try:
+                        # Use os.lstat to avoid following symlinks
+                        st = os.lstat(filepath)
+                        # Skip non-regular files (e.g., symlinks, devices)
+                        if not stat.S_ISREG(st.st_mode):
+                            continue
+
+                        # Double-check mount after file discovery (for bind mounts, etc.)
+                        if should_skip_path(filepath, mount_info):
+                            continue
+
+                        size = st.st_size
+                        mtime = st.st_mtime
+                        atime = st.st_atime
+
+                        # Safely handle path encoding
+                        if isinstance(filepath, bytes):
+                            path_str = safe_decode_path(filepath)
+                        else:
+                            path_str = filepath
+
+                        buffer.append({
+                            'path': path_str,
+                            'size_bytes': size,
+                            'mtime': mtime,
+                            'atime': atime
+                        })
+                        file_count += 1
+
+                        if len(buffer) >= chunk_size:
+                            writer.writerows(buffer)
+                            csvfile.flush()  # ensure write to disk
+                            buffer.clear()
+                            print(f"[INFO] Processed {file_count} files...", file=sys.stderr)
+
+                    except (OSError, IOError) as e:
+                        # Skip inaccessible files (e.g., permission denied, broken links)
+                        continue
+
+        except KeyboardInterrupt:
+            print("\n[INFO] Scan interrupted by user.", file=sys.stderr)
+
+        # Write remaining buffer
+        if buffer:
+            writer.writerows(buffer)
+            print(f"[INFO] Final write: total files = {file_count}", file=sys.stderr)
+
+    return csv_path
+
+
+def create_visualization(csv_path):
+    """Create interactive Plotly visualization with monthly drill-down."""
+    print("[INFO] Loading data for visualization...", file=sys.stderr)
+    df = pd.read_csv(csv_path, dtype={'path': 'string', 'size_bytes': 'int64'})
+
+    # Convert timestamps to datetime
+    df['mtime_dt'] = pd.to_datetime(df['mtime'], unit='s')
+    df['atime_dt'] = pd.to_datetime(df['atime'], unit='s')
+
+    # Create monthly bins
+    df['mtime_month'] = df['mtime_dt'].dt.to_period('M').astype(str)
+    df['atime_month'] = df['atime_dt'].dt.to_period('M').astype(str)
+
+    # Aggregate by month
+    mtime_agg = df.groupby('mtime_month').agg(
+        file_count=('mtime', 'count'),
+        total_size=('size_bytes', 'sum')
+    ).reset_index()
+
+    atime_agg = df.groupby('atime_month').agg(
+        file_count=('atime', 'count'),
+        total_size=('size_bytes', 'sum')
+    ).reset_index()
+
+    # Ensure consistent month order
+    all_months = sorted(set(mtime_agg['mtime_month']) | set(atime_agg['atime_month']))
+    mtime_agg = mtime_agg.set_index('mtime_month').reindex(all_months, fill_value=0).reset_index()
+    atime_agg = atime_agg.set_index('atime_month').reindex(all_months, fill_value=0).reset_index()
+
+    # Create interactive plot
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=(
+            'Files by Modification Time (Count)',
+            'Files by Access Time (Count)',
+            'Files by Modification Time (Total Size)',
+            'Files by Access Time (Total Size)'
+        ),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]]
+    )
+
+    # Counts
+    fig.add_trace(go.Bar(x=mtime_agg['mtime_month'], y=mtime_agg['file_count'], name='Mod Count'), row=1, col=1)
+    fig.add_trace(go.Bar(x=atime_agg['atime_month'], y=atime_agg['file_count'], name='Access Count'), row=1, col=2)
+
+    # Sizes
+    fig.add_trace(go.Bar(x=mtime_agg['mtime_month'], y=mtime_agg['total_size'], name='Mod Size'), row=2, col=1)
+    fig.add_trace(go.Bar(x=atime_agg['atime_month'], y=atime_agg['total_size'], name='Access Size'), row=2, col=2)
+
+    fig.update_layout(
+        title="Filesystem Audit: Time-Based Distribution",
+        height=800,
+        showlegend=False,
+        hovermode='x unified'
+    )
+
+    # Add click interaction: on bar click, show all files in that month
+    # Note: Plotly itself doesn’t support drill-down to raw data natively in static HTML,
+    # but we can embed file listings in hover or suggest exporting data.
+    # For true interactivity (e.g., clicking to list files), a Dash app would be needed.
+    # As a practical compromise, we save monthly listings to a parquet or CSV for inspection.
+
+    # Save monthly file listings for drill-down
+    drilldown_dir = 'drilldown_data'
+    Path(drilldown_dir).mkdir(exist_ok=True)
+
+    for month in all_months:
+        if month == '0':
+            continue
+        # Modification-based
+        mod_files = df[df['mtime_month'] == month]
+        if not mod_files.empty:
+            mod_files[['path', 'size_bytes', 'mtime', 'atime']].to_csv(
+                f"{drilldown_dir}/mod_{month}.csv", index=False
+            )
+        # Access-based
+        acc_files = df[df['atime_month'] == month]
+        if not acc_files.empty:
+            acc_files[['path', 'size_bytes', 'mtime', 'atime']].to_csv(
+                f"{drilldown_dir}/access_{month}.csv", index=False
+            )
+
+    # Save HTML
+    output_html = 'filesystem_audit.html'
+    fig.write_html(output_html)
+    print(f"[INFO] Visualization saved to {output_html}", file=sys.stderr)
+    print(f"[INFO] Monthly file listings saved in '{drilldown_dir}' directory for detailed inspection.", file=sys.stderr)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Scan filesystem and generate inventory CSV + visualization.")
-    parser.add_argument("-o", "--output", default="file_inventory.csv",
-                        help="Output CSV file path (default: file_inventory.csv)")
-    parser.add_argument("-c", "--chunk-size", type=int, default=10000,
-                        help="Number of rows per write chunk (default: 10000)")
-    parser.add_argument("-v", "--visualize", action="store_true",
-                        help="Generate interactive HTML visualization after scan")
+    parser = argparse.ArgumentParser(description="Audit Linux filesystem as root and generate visualization.")
+    parser.add_argument('--output', '-o', default='filesystem_audit.csv',
+                        help='Output CSV file path (default: filesystem_audit.csv)')
+    parser.add_argument('--chunk-size', type=int, default=100000,
+                        help='Number of records per write chunk (default: 100000)')
+    parser.add_argument('--no-viz', action='store_true',
+                        help='Skip visualization step')
     args = parser.parse_args()
 
-    if not is_root():
-        print("Error: This script must be run as root.", file=sys.stderr)
+    if os.geteuid() != 0:
+        print("[ERROR] This script must be run as root.", file=sys.stderr)
         sys.exit(1)
 
-    csv_path = Path(args.output).resolve()
-    chunk_size = args.chunk_size
+    print("[INFO] Starting filesystem scan. This may take a long time on large systems...", file=sys.stderr)
+    csv_path = collect_file_metadata(root_path='/', chunk_size=args.chunk_size, csv_path=args.output)
 
-    print("Scanning local filesystems only (skipping NFS, CIFS, etc.)...")
-    local_mounts = get_local_filesystems()
-    print(f"Local mount points considered: {sorted(local_mounts)}")
+    if not args.no_viz:
+        create_visualization(csv_path)
 
-    # Prepare CSV
-    fieldnames = ['path', 'size_bytes', 'mtime', 'atime']
-    first_write = True
-    buffer = []
-
-    count = 0
-    start_time = time.time()
-
-    try:
-        for record in walk_files_safe(Path('/'), local_mounts):
-            buffer.append(record)
-            count += 1
-
-            if len(buffer) >= chunk_size:
-                mode = 'w' if first_write else 'a'
-                with open(csv_path, mode, newline='', encoding='utf-8', errors='replace') as f:
-                    writer = csv.writer(f)
-                    if first_write:
-                        writer.writerow(fieldnames)
-                        first_write = False
-                    writer.writerows(buffer)
-                buffer.clear()
-                elapsed = time.time() - start_time
-                print(f"Processed {count} files... ({elapsed:.1f}s)", file=sys.stderr)
-
-        # Final flush
-        if buffer:
-            with open(csv_path, 'a', newline='', encoding='utf-8', errors='replace') as f:
-                writer = csv.writer(f)
-                writer.writerows(buffer)
-
-        total_time = time.time() - start_time
-        print(f"Scan complete: {count} files written to {csv_path} in {total_time:.1f} seconds.")
-
-    except KeyboardInterrupt:
-        print("\nInterrupted by user. Partial results saved.", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Unexpected error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # Visualization
-    if args.visualize and HAS_VIS:
-        try:
-            print("Generating visualization...")
-            df = pd.read_csv(csv_path, dtype={'path': 'str', 'size_bytes': 'int64'})
-
-            # Convert timestamps to datetime
-            df['mtime_dt'] = pd.to_datetime(df['mtime'], unit='s')
-            df['atime_dt'] = pd.to_datetime(df['atime'], unit='s')
-
-            # Resample by month for aggregation
-            df['mtime_month'] = df['mtime_dt'].dt.to_period('M').dt.start_time
-            df['atime_month'] = df['atime_dt'].dt.to_period('M').dt.start_time
-
-            # Aggregate: count and total size per month (for mtime)
-            mtime_agg = df.groupby('mtime_month').agg(
-                file_count=('path', 'count'),
-                total_size=('size_bytes', 'sum')
-            ).reset_index()
-
-            # Create plot
-            fig = make_subplots(
-                rows=2, cols=1,
-                shared_xaxes=True,
-                vertical_spacing=0.05,
-                subplot_titles=('File Count by Modification Month', 'Total Size by Modification Month')
-            )
-
-            # File count
-            fig.add_trace(
-                go.Bar(x=mtime_agg['mtime_month'], y=mtime_agg['file_count'], name='File Count'),
-                row=1, col=1
-            )
-
-            # Total size
-            fig.add_trace(
-                go.Bar(x=mtime_agg['mtime_month'], y=mtime_agg['total_size'], name='Total Size (bytes)'),
-                row=2, col=1
-            )
-
-            fig.update_layout(
-                title="File Inventory by Modification Time (Local Filesystems Only)",
-                height=700,
-                showlegend=False
-            )
-
-            # Add hover with sample file paths (top 10 per month)
-            hover_data = {}
-            for month in mtime_agg['mtime_month']:
-                sample_files = df[df['mtime_month'] == month]['path'].head(10).tolist()
-                hover_text = "<br>".join([f"• {p}" for p in sample_files])
-                hover_data[month] = f"Files (sample):<br>{hover_text}"
-
-            # Apply hover to both traces
-            for trace in fig.data:
-                trace.hovertemplate = (
-                    '<b>%{x|%Y-%m}</b><br>' +
-                    ('File Count: %{y:,}' if 'count' in trace.name else 'Size: %{y:,} bytes') +
-                    '<br><br>' +
-                    '%{customdata}' +
-                    '<extra></extra>'
-                )
-                trace.customdata = [hover_data.get(x, "") for x in trace.x]
-
-            output_html = csv_path.with_suffix('.html')
-            fig.write_html(output_html)
-            print(f"Visualization saved to {output_html}")
-
-        except Exception as e:
-            print(f"Visualization failed: {e}", file=sys.stderr)
+    print("[INFO] Done.", file=sys.stderr)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
