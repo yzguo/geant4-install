@@ -12,18 +12,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN rm -rf /etc/apt/sources.list.d || true
 COPY sources.list /etc/apt/sources.list
 
-# If you need Chinese locale support, uncomment the following lines
-# RUN apt-get update && \
-#     apt-get install -y locales && \
-#     echo "zh_CN.UTF-8 UTF-8" >> /etc/locale.gen && \
-#     locale-gen zh_CN.UTF-8
-
 RUN apt-get update && apt-get upgrade -y && \
     apt-get install -y \
     sudo \
     build-essential \
     net-tools \
     ca-certificates \
+    locales \
     git \
     cmake \
     wget \
@@ -49,7 +44,9 @@ RUN apt-get update && apt-get upgrade -y && \
     libglew-dev \
     libglfw3-dev
 
-RUN rm -rf /var/lib/apt/lists/*
+RUN rm -rf /var/lib/apt/lists/* && \
+    echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen && \
+    locale-gen en_US.UTF-8
 
 RUN mkdir -p /var/run/sshd && \
     echo "root:$SSH_PASSWORD" | chpasswd && \
